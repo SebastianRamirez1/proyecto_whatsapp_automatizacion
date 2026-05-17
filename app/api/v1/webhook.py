@@ -1,9 +1,11 @@
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, status
+from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.security import verify_meta_signature
+from app.db.session import get_db
 from app.schemas.interpretation import MessageIntent
 from app.schemas.webhook import WhatsAppWebhookPayload
 from app.services.interpretation import (
@@ -11,6 +13,7 @@ from app.services.interpretation import (
     build_confirmation_message,
     interpret_message,
 )
+from app.services.orders import create_order_from_interpretation, get_or_create_client
 from app.services.whatsapp import send_text_message
 
 logger = logging.getLogger(__name__)
@@ -30,33 +33,54 @@ async def verify_webhook(
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Verification failed")
 
 
-async def _process_message(sender: str, message_body: str, wa_message_id: str) -> None:
-    """Background task: interprets the message and replies via WhatsApp."""
-    logger.info("Processing message | from=%s | wa_id=%s", sender, wa_message_id)
+async def _process_message(
+    sender: str,
+    sender_name: str | None,
+    message_body: str,
+    wa_message_id: str,
+    db: Session,
+) -> None:
+    """
+    Full pipeline: interpret → persist → reply.
+    Runs as a BackgroundTask so Meta gets 200 immediately.
+    """
+    logger.info("Processing | from=%s | wa_id=%s", sender, wa_message_id)
 
     result = await interpret_message(message=message_body)
-
-    logger.info(
-        "Interpretation | intent=%s | confidence=%.2f | items=%d",
-        result.intent,
-        result.confianza,
-        len(result.items),
-    )
+    logger.info("Intent=%s | confidence=%.2f | items=%d", result.intent, result.confianza, len(result.items))
 
     if result.intent == MessageIntent.nuevo_pedido and result.confianza >= 0.6:
+        client = get_or_create_client(db, phone=sender, name=sender_name)
+        order = create_order_from_interpretation(
+            db=db,
+            client=client,
+            result=result,
+            raw_message=message_body,
+            wa_message_id=wa_message_id,
+        )
         reply = build_confirmation_message(result)
+        reply += f"\n\n🔖 N° de pedido: *#{order.id}*"
+
     elif result.intent == MessageIntent.consulta_estado:
-        reply = "📦 Estoy consultando el estado de tu pedido, te respondo en un momento."
+        reply = (
+            "📦 Consultando el estado de tu pedido...\n"
+            "Si tienes el número de pedido, compártelo y te doy el detalle exacto."
+        )
+
     elif result.intent == MessageIntent.cancelacion:
-        reply = "Recibido. Voy a gestionar la cancelación de tu pedido. Te confirmo en breve."
+        reply = (
+            "Recibido. Voy a gestionar la cancelación. "
+            "En breve te confirmo. Si tienes el N° de pedido, compártelo."
+        )
+
     elif result.intent == MessageIntent.saludo:
         reply = (
-            "¡Hola! Soy el asistente de pedidos. "
-            "Para hacer un pedido escríbeme el producto y la cantidad, por ejemplo: "
-            "*2 cubetas de huevos AA*"
+            "¡Hola! Soy el asistente de pedidos de la distribuidora. 🥚\n\n"
+            "Para hacer un pedido escríbeme el producto y la cantidad, por ejemplo:\n"
+            "_2 cubetas de huevos AA a Calle 45 # 12-30_"
         )
+
     else:
-        # ambiguo o confianza baja
         reply = build_clarification_message(result.razon_ambiguo)
 
     try:
@@ -69,6 +93,7 @@ async def _process_message(sender: str, message_body: str, wa_message_id: str) -
 async def receive_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
     x_hub_signature_256: str = Header(default=None),
 ):
     """Receives and processes incoming WhatsApp events from Meta Cloud API."""
@@ -93,17 +118,19 @@ async def receive_webhook(
                     logger.info("Skipping non-text message | type=%s", message.type)
                     continue
 
-                logger.info(
-                    "Queuing message for processing | from=%s | body=%r",
-                    message.from_,
-                    message.text.body[:80],
+                contact = next(
+                    (c for c in (change.value.contacts or []) if c.wa_id == message.from_),
+                    None,
                 )
+                sender_name = contact.profile.get("name") if contact else None
+
                 background_tasks.add_task(
                     _process_message,
                     sender=message.from_,
+                    sender_name=sender_name,
                     message_body=message.text.body,
                     wa_message_id=message.id,
+                    db=db,
                 )
 
-    # Meta requiere respuesta 200 inmediata; el procesamiento ocurre en background
     return {"status": "received"}
