@@ -62,6 +62,8 @@ def health_check():
 @app.post("/debug/whatsapp-test", tags=["Health"], summary="Test envío WhatsApp")
 async def debug_whatsapp(to: str, _: str = Depends(get_current_user)):
     """Prueba el envío de WhatsApp con el token actual del servidor. Solo admin."""
+    import os
+    os_token = os.environ.get("WHATSAPP_ACCESS_TOKEN", "NO_ENCONTRADO_EN_OS_ENV")
     url = f"https://graph.facebook.com/v20.0/{settings.WHATSAPP_PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}", "Content-Type": "application/json"}
     payload = {
@@ -73,7 +75,12 @@ async def debug_whatsapp(to: str, _: str = Depends(get_current_user)):
     }
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(url, headers=headers, json=payload)
-    return {"status_code": resp.status_code, "token_prefix": settings.WHATSAPP_ACCESS_TOKEN[:20] + "...", "response": resp.json()}
+    return {
+        "status_code": resp.status_code,
+        "token_from_settings": settings.WHATSAPP_ACCESS_TOKEN[:20] + "...",
+        "token_from_os_env": os_token[:20] + "...",
+        "response": resp.json(),
+    }
 
 
 def custom_openapi():
