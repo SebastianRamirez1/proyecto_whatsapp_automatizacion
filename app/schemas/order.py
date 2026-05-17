@@ -16,12 +16,24 @@ class OrderItemOut(BaseModel):
         from_attributes = True
 
 
+class ClientOut(BaseModel):
+    id: int
+    phone: str
+    name: str | None
+
+    class Config:
+        from_attributes = True
+
+
 class OrderOut(BaseModel):
     id: int
     client_id: int
+    client: ClientOut | None = None
     status: OrderStatus
     delivery_address: str | None
     notes: str | None
+    raw_message: str
+    wa_message_id: str | None
     created_at: datetime
     updated_at: datetime
     items: list[OrderItemOut] = []
@@ -32,3 +44,10 @@ class OrderOut(BaseModel):
 
 class OrderStatusUpdate(BaseModel):
     status: OrderStatus
+
+
+class OrderListParams(BaseModel):
+    status: OrderStatus | None = None
+    phone: str | None = None
+    skip: int = 0
+    limit: int = 50
