@@ -1,6 +1,6 @@
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class WhatsAppTextBody(BaseModel):
@@ -8,15 +8,13 @@ class WhatsAppTextBody(BaseModel):
 
 
 class WhatsAppMessage(BaseModel):
-    from_: str
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_: str = Field(alias="from")
     id: str
     timestamp: str
     type: str
     text: WhatsAppTextBody | None = None
-
-    class Config:
-        populate_by_name = True
-        fields = {"from_": "from"}
 
 
 class WhatsAppContact(BaseModel):
