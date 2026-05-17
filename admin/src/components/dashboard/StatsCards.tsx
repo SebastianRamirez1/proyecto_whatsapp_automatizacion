@@ -51,7 +51,7 @@ export default function StatsCards() {
               {stats?.by_status?.[status] ?? 0}
             </p>
             <span className={`text-xs px-2 py-0.5 rounded-full border font-medium ${STATUS_COLORS[status]}`}>
-              {status}
+              {STATUS_LABEL[status]}
             </span>
           </CardContent>
         </Card>
