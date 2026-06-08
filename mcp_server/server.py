@@ -17,32 +17,14 @@ Variables de entorno:
 
 from __future__ import annotations
 
-# ── IPv4 DNS fix (Windows [Errno 11001] getaddrinfo failed) ──────────────────
-# socket.getaddrinfo con AF_UNSPEC falla en algunas configs de Windows.
-# Solución: parchear socket.create_connection para pre-resolver el host con
-# gethostbyname (IPv4-only, siempre funciona), y pasar la IP directamente.
-# httpcore/httpx usan socket.create_connection como atributo de módulo,
-# por lo que este parche se aplica en tiempo de llamada.
-import socket as _sock
-
-_orig_create_conn = _sock.create_connection
-
-def _ipv4_create_connection(address, *args, **kwargs):
-    host, port = address
-    try:
-        ip = _sock.gethostbyname(host)
-        address = (ip, port)
-    except OSError:
-        pass  # Si falla, dejar que siga con la dirección original
-    return _orig_create_conn(address, *args, **kwargs)
-
-_sock.create_connection = _ipv4_create_connection
-# ─────────────────────────────────────────────────────────────────────────────
-
+import http.client
+import json
 import os
+import socket
+import ssl
+import urllib.parse
 from typing import Any
 
-import httpx
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
@@ -67,6 +49,86 @@ VALID_TRANSITIONS: dict[str, list[str]] = {
     "cancelado":      [],
 }
 
+
+# ── HTTP client (stdlib pura — evita getaddrinfo / AF_UNSPEC) ─────────────────
+# En algunos Windows, socket.getaddrinfo con AF_UNSPEC falla para ciertos
+# hostnames mientras que socket.gethostbyname (IPv4 puro) funciona OK.
+# Usamos http.client.HTTPSConnection con connect() personalizado que emplea
+# gethostbyname en lugar de getaddrinfo para resolver el hostname.
+
+class _IPv4HTTPSConn(http.client.HTTPSConnection):
+    """HTTPSConnection que resuelve con gethostbyname (IPv4) en lugar de getaddrinfo."""
+
+    def connect(self) -> None:
+        # Resolver hostname manualmente con IPv4
+        try:
+            ip = socket.gethostbyname(self.host)
+        except OSError:
+            ip = self.host  # Fallback: intentar con el hostname directo
+
+        # Crear socket IPv4 directamente (sin llamar a getaddrinfo)
+        raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        timeout = self.timeout
+        raw.settimeout(timeout if isinstance(timeout, (int, float)) else 10)
+        raw.connect((ip, self.port))
+
+        # Envolver con TLS usando el hostname original para SNI y verificacion
+        ctx: ssl.SSLContext = getattr(self, "_context", None) or ssl.create_default_context()
+        self.sock = ctx.wrap_socket(raw, server_hostname=self.host)
+
+
+def _do_request(
+    method: str,
+    url: str,
+    *,
+    body: dict | None = None,
+    headers: dict | None = None,
+    params: dict | None = None,
+    timeout: int = 10,
+) -> tuple[int, Any]:
+    """Ejecuta una solicitud HTTPS y devuelve (status_code, json_body)."""
+    parsed = urllib.parse.urlparse(url)
+    host   = parsed.hostname or ""
+    port   = parsed.port or 443
+    path   = parsed.path or "/"
+
+    if params:
+        clean = {k: str(v) for k, v in params.items() if v is not None}
+        if clean:
+            path += "?" + urllib.parse.urlencode(clean)
+
+    h: dict[str, str] = {"Host": host, "Accept": "application/json"}
+    if body is not None:
+        encoded = json.dumps(body).encode()
+        h["Content-Type"] = "application/json"
+        h["Content-Length"] = str(len(encoded))
+    else:
+        encoded = None
+
+    if headers:
+        h.update(headers)
+
+    conn = _IPv4HTTPSConn(host, port, timeout=timeout)
+    try:
+        conn.request(method, path, body=encoded, headers=h)
+        resp = conn.getresponse()
+        status = resp.status
+        raw_body = resp.read()
+    finally:
+        conn.close()
+
+    if not raw_body:
+        return status, {}
+    return status, json.loads(raw_body.decode("utf-8"))
+
+
+class _HTTPError(Exception):
+    def __init__(self, status: int, body: Any):
+        self.status = status
+        self.body   = body
+        super().__init__(f"HTTP {status}: {body}")
+
+
 # ── Auth — JWT con refresh automatico en 401 ─────────────────────────────────
 _token: str | None = None
 
@@ -77,13 +139,14 @@ def _login() -> str:
             "Faltan credenciales. "
             "Defini ADMIN_USERNAME y ADMIN_PASSWORD en mcp_server/.env o como env vars."
         )
-    resp = httpx.post(
+    status, data = _do_request(
+        "POST",
         f"{API_URL}/api/v1/auth/login",
-        json={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD},
-        timeout=10,
+        body={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD},
     )
-    resp.raise_for_status()
-    return resp.json()["access_token"]
+    if status != 200:
+        raise _HTTPError(status, data)
+    return data["access_token"]
 
 
 def _get_token() -> str:
@@ -93,31 +156,31 @@ def _get_token() -> str:
     return _token
 
 
-def _auth_headers() -> dict[str, str]:
+def _auth_header() -> dict[str, str]:
     return {"Authorization": f"Bearer {_get_token()}"}
 
 
 # ── HTTP helpers con retry en 401 ─────────────────────────────────────────────
 def _get(path: str, **params: Any) -> Any:
     global _token
-    clean = {k: v for k, v in params.items() if v is not None}
-    resp = httpx.get(f"{API_URL}{path}", headers=_auth_headers(), params=clean, timeout=10)
-    if resp.status_code == 401:
+    status, data = _do_request("GET", f"{API_URL}{path}", headers=_auth_header(), params=params)
+    if status == 401:
         _token = None
-        resp = httpx.get(f"{API_URL}{path}", headers=_auth_headers(), params=clean, timeout=10)
-    resp.raise_for_status()
-    return resp.json()
+        status, data = _do_request("GET", f"{API_URL}{path}", headers=_auth_header(), params=params)
+    if status >= 400:
+        raise _HTTPError(status, data)
+    return data
 
 
 def _patch(path: str, body: dict, **params: Any) -> Any:
     global _token
-    clean = {k: v for k, v in params.items() if v is not None}
-    resp = httpx.patch(f"{API_URL}{path}", headers=_auth_headers(), json=body, params=clean, timeout=10)
-    if resp.status_code == 401:
+    status, data = _do_request("PATCH", f"{API_URL}{path}", body=body, headers=_auth_header(), params=params)
+    if status == 401:
         _token = None
-        resp = httpx.patch(f"{API_URL}{path}", headers=_auth_headers(), json=body, params=clean, timeout=10)
-    resp.raise_for_status()
-    return resp.json()
+        status, data = _do_request("PATCH", f"{API_URL}{path}", body=body, headers=_auth_header(), params=params)
+    if status >= 400:
+        raise _HTTPError(status, data)
+    return data
 
 
 # ── MCP Server ────────────────────────────────────────────────────────────────
@@ -158,8 +221,8 @@ def obtener_pedido(order_id: int) -> dict:
     """
     try:
         return _get(f"/api/v1/orders/{order_id}")
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
+    except _HTTPError as e:
+        if e.status == 404:
             return {"error": f"No existe un pedido con ID {order_id}"}
         raise
 
@@ -202,11 +265,12 @@ def actualizar_estado(
             {"status": nuevo_estado},
             notify=str(notificar_cliente).lower(),
         )
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
+    except _HTTPError as e:
+        if e.status == 404:
             return {"error": f"No existe un pedido con ID {order_id}"}
-        if e.response.status_code == 400:
-            return {"error": e.response.json().get("detail", "Transicion no permitida")}
+        if e.status == 400:
+            detail = e.body.get("detail", "Transicion no permitida") if isinstance(e.body, dict) else str(e.body)
+            return {"error": detail}
         raise
 
 
@@ -242,8 +306,8 @@ def _make_secret_guard(app: Any, secret: str) -> Any:
             await app(scope, receive, send)
             return
 
-        headers = {k: v for k, v in scope.get("headers", [])}
-        auth = headers.get(b"authorization", b"").decode()
+        hdrs = {k: v for k, v in scope.get("headers", [])}
+        auth = hdrs.get(b"authorization", b"").decode()
 
         if auth == f"Bearer {secret}":
             await app(scope, receive, send)
