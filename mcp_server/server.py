@@ -230,7 +230,7 @@ def _make_secret_guard(app: Any, secret: str) -> Any:
             return
 
         # Rechazar con 401
-        body = b'{"error":"Unauthorized — falta o es incorrecto el Bearer token"}'
+        body = b'{"error":"Unauthorized - falta o es incorrecto el Bearer token"}'
         await send({
             "type": "http.response.start",
             "status": 401,
