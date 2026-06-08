@@ -1,14 +1,14 @@
 # MCP Server — Pedidos WhatsApp
 
 Servidor [MCP (Model Context Protocol)](https://modelcontextprotocol.io) que expone
-la API de pedidos como herramientas para Claude Desktop, Cursor, o cualquier cliente
-compatible con MCP.
+la API de pedidos como herramientas conversacionales para Claude Desktop, Cursor,
+o cualquier cliente compatible con MCP.
 
-Una vez conectado podés preguntarle a Claude cosas como:
+Una vez conectado podés preguntarle a Claude:
 - *"¿Cuántos pedidos llegaron hoy?"*
-- *"Mostrá todos los pedidos que están en preparación"*
 - *"Confirmá el pedido 42 y notificá al cliente"*
-- *"¿Qué pedidos están pendientes de entrega?"*
+- *"Mostrá los pedidos en preparación"*
+- *"¿Hay pedidos sin confirmar hace más de una hora?"*
 
 ---
 
@@ -16,57 +16,54 @@ Una vez conectado podés preguntarle a Claude cosas como:
 
 | Tool | Descripción |
 |------|-------------|
-| `listar_pedidos` | Lista pedidos con filtros opcionales por estado y teléfono |
+| `listar_pedidos` | Lista pedidos con filtros opcionales de estado y teléfono |
 | `obtener_pedido` | Detalle completo de un pedido por ID |
 | `estadisticas_pedidos` | Conteo total y por estado |
-| `actualizar_estado` | Cambia el estado + envía WhatsApp automático al cliente |
-| `pedidos_pendientes` | Todos los pedidos que necesitan atención (no finalizados) |
+| `actualizar_estado` | Cambia estado + WhatsApp automático al cliente |
+| `pedidos_pendientes` | Todos los pedidos no finalizados agrupados por estado |
 
 ---
 
-## Instalación
+## Modos de uso
 
-### 1. Requisitos previos
+### Modo A — Local con Claude Desktop (stdio)
+El proceso MCP corre en tu PC, Claude Desktop se comunica por stdin/stdout.
+Sin servidor, sin costos, ideal para uso personal.
+
+### Modo B — Remoto en Railway (SSE)
+El MCP server corre en Railway como servicio HTTP. Cualquier Claude Desktop
+o Cursor puede conectarse desde cualquier dispositivo usando solo la URL.
+
+---
+
+## Instalación local (Modo A)
+
+### 1. Requisitos
 - Python 3.11+
 - Backend corriendo (Railway o local)
 
 ### 2. Instalar dependencias
 
 ```bash
-# Desde la raíz del repo
+# Opción 1 — desde el repo
 pip install -r mcp_server/requirements.txt
+
+# Opción 2 — uvx (instala y ejecuta sin virtualenv)
+uvx --from git+https://github.com/SebastianRamirez1/proyecto_whatsapp_automatizacion.git pedidos-whatsapp-mcp
 ```
 
-O con `uv` (recomendado):
-```bash
-uv pip install -r mcp_server/requirements.txt
-```
-
-### 3. Configurar credenciales
+### 3. Credenciales
 
 ```bash
 cp mcp_server/.env.example mcp_server/.env
-# Editar mcp_server/.env con tu URL y credenciales
+# Editar mcp_server/.env con tu contraseña
 ```
 
-### 4. Probar que funciona
+### 4. Agregar a Claude Desktop
 
-```bash
-python mcp_server/server.py
-```
-
-Si no hay errores de importación, el servidor está listo.
-
----
-
-## Conectar a Claude Desktop
-
-Abrí el archivo de configuración de Claude Desktop:
-
+Abrí el archivo de configuración:
 - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-
-Agregá esta entrada dentro de `"mcpServers"`:
 
 ```json
 {
@@ -74,7 +71,7 @@ Agregá esta entrada dentro de `"mcpServers"`:
     "pedidos-whatsapp": {
       "command": "python",
       "args": ["mcp_server/server.py"],
-      "cwd": "/ruta/absoluta/al/proyecto_whatsapp_automatico",
+      "cwd": "/ruta/absoluta/al/proyecto",
       "env": {
         "API_URL": "https://web-production-42788.up.railway.app",
         "ADMIN_USERNAME": "admin",
@@ -85,81 +82,140 @@ Agregá esta entrada dentro de `"mcpServers"`:
 }
 ```
 
-> **Reemplazá `/ruta/absoluta/al/proyecto_whatsapp_automatico`** con la ruta real en tu máquina.
-> En Windows usá barras invertidas dobles: `"C:\\Users\\SEBASTIAN\\Desktop\\proyecto_whatsapp_automatico"`
+> **Windows:** usar `"C:\\Users\\SEBASTIAN\\Desktop\\proyecto_whatsapp_automatico"` como `cwd`.
 
-Reiniciá Claude Desktop. Deberías ver el servidor "pedidos-whatsapp" conectado en la barra inferior.
+Reiniciá Claude Desktop. El servidor aparece conectado en la barra inferior.
 
 ---
 
-## Conectar a Cursor
+## Deploy en Railway (Modo B — remoto)
 
-En Cursor, abrí `Cursor Settings > MCP` y agregá un servidor:
+### 1. Crear un nuevo servicio en Railway
+
+En tu proyecto Railway:
+1. **New Service → GitHub Repo** → seleccionar el mismo repo
+2. En **Settings → General**:
+   - **Root Directory:** *(vacío — usa la raíz del repo)*
+   - **Start Command:** `python mcp_server/server.py`
+
+### 2. Variables de entorno en Railway
+
+| Variable | Valor |
+|----------|-------|
+| `API_URL` | `https://web-production-42788.up.railway.app` |
+| `ADMIN_USERNAME` | `admin` |
+| `ADMIN_PASSWORD` | tu contraseña |
+| `MCP_SECRET` | una cadena aleatoria segura (ej: `openssl rand -hex 32`) |
+
+> Railway inyecta `PORT` automáticamente — no hace falta configurarlo.
+
+### 3. Conectar desde Claude Desktop (remoto)
+
+Una vez deployed, Railway te da una URL tipo `https://tu-mcp-server.railway.app`.
 
 ```json
 {
-  "name": "pedidos-whatsapp",
-  "command": "python mcp_server/server.py",
-  "cwd": "/ruta/al/proyecto",
-  "env": {
-    "API_URL": "https://web-production-42788.up.railway.app",
-    "ADMIN_USERNAME": "admin",
-    "ADMIN_PASSWORD": "tu_contraseña"
+  "mcpServers": {
+    "pedidos-whatsapp": {
+      "url": "https://tu-mcp-server.railway.app/sse",
+      "headers": {
+        "Authorization": "Bearer tu_MCP_SECRET_aqui"
+      }
+    }
   }
 }
 ```
 
+Sin importar dónde estés o qué dispositivo uses, tenés acceso al servidor.
+
 ---
 
-## Ejemplos de uso en Claude Desktop
+## Instalar con `uvx` (Opción B alternativa — sin clonar el repo)
 
-Una vez conectado, podés escribir en lenguaje natural:
+`uvx` instala el paquete en un entorno temporal y lo ejecuta directamente:
 
-```
-Mostrame los pedidos de hoy que están recibidos pero aún no confirmados
-```
-
-```
-Confirmá el pedido 15 y avisale al cliente
+```bash
+# Instalar y ejecutar desde GitHub (sin clonar)
+uvx --from git+https://github.com/SebastianRamirez1/proyecto_whatsapp_automatizacion.git \
+    pedidos-whatsapp-mcp
 ```
 
-```
-¿Cuántos pedidos se entregaron esta semana?
+Con variables de entorno:
+```bash
+API_URL=https://... ADMIN_USERNAME=admin ADMIN_PASSWORD=pass \
+uvx --from git+https://github.com/SebastianRamirez1/proyecto_whatsapp_automatizacion.git \
+    pedidos-whatsapp-mcp
 ```
 
+En `claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "pedidos-whatsapp": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/SebastianRamirez1/proyecto_whatsapp_automatizacion.git",
+        "pedidos-whatsapp-mcp"
+      ],
+      "env": {
+        "API_URL": "https://web-production-42788.up.railway.app",
+        "ADMIN_USERNAME": "admin",
+        "ADMIN_PASSWORD": "tu_contraseña"
+      }
+    }
+  }
+}
 ```
-Hay algún pedido que lleva mucho tiempo en preparación?
-```
+
+No hace falta clonar el repo ni instalar dependencias manualmente.
 
 ---
 
 ## Arquitectura
 
 ```
-Claude Desktop / Cursor
-        │  MCP Protocol (stdio)
-        ▼
-mcp_server/server.py   ← FastMCP + 5 tools
-        │  HTTP + JWT Bearer
-        ▼
-FastAPI en Railway     ← /api/v1/orders/*
-        │  SQLAlchemy ORM
-        ▼
-PostgreSQL (Railway)
+┌─────────────────────────┐
+│  Claude Desktop / Cursor │
+│  (cualquier dispositivo) │
+└────────────┬────────────┘
+             │
+    MCP Protocol
+    stdio (local) o SSE (remoto)
+             │
+┌────────────▼────────────┐
+│   mcp_server/server.py   │
+│   FastMCP + 5 tools      │
+│   Auto-detect transport  │
+│   JWT cache + refresh    │
+└────────────┬────────────┘
+             │
+    HTTP + Bearer JWT
+             │
+┌────────────▼────────────┐
+│  FastAPI en Railway      │
+│  /api/v1/orders/*        │
+└────────────┬────────────┘
+             │
+┌────────────▼────────────┐
+│  PostgreSQL (Railway)    │
+└─────────────────────────┘
 ```
 
-El servidor MCP:
-1. Lee credenciales del entorno
-2. Hace login automático en el backend al recibir la primera tool call
-3. Cachea el JWT y lo renueva automáticamente si expira (401)
-4. Traduce cada tool call en una o más llamadas HTTP al backend
+### Flujo de autenticación
+1. Primera tool call → login automático con `ADMIN_USERNAME` / `ADMIN_PASSWORD`
+2. JWT cacheado en memoria → reutilizado en llamadas siguientes
+3. Si expira (401) → re-login automático, transparente para el usuario
+4. En modo SSE: `MCP_SECRET` guard valida el Bearer token del cliente MCP
 
 ---
 
 ## Variables de entorno
 
-| Variable | Descripción | Default |
-|----------|-------------|---------|
-| `API_URL` | URL base del backend FastAPI | `https://web-production-42788.up.railway.app` |
-| `ADMIN_USERNAME` | Usuario administrador | — |
-| `ADMIN_PASSWORD` | Contraseña del admin | — |
+| Variable | Descripción | Requerida |
+|----------|-------------|-----------|
+| `API_URL` | URL base del backend FastAPI | Sí |
+| `ADMIN_USERNAME` | Usuario administrador | Sí |
+| `ADMIN_PASSWORD` | Contraseña admin | Sí |
+| `MCP_SECRET` | Token para proteger el endpoint SSE | Solo en modo remoto |
+| `PORT` | Puerto HTTP (Railway lo inyecta automáticamente) | Auto |
