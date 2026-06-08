@@ -195,6 +195,65 @@ mcp = FastMCP(
 
 
 @mcp.tool()
+def test_conexion() -> dict:
+    """Diagnostica la conectividad de red desde el proceso MCP (util para debug)."""
+    import socket as _s
+    import ssl
+    import http.client
+    results: dict = {}
+
+    host = "web-production-42788.up.railway.app"
+
+    # 1. gethostbyname
+    try:
+        ip = _s.gethostbyname(host)
+        results["gethostbyname"] = f"OK: {ip}"
+    except Exception as e:
+        ip = None
+        results["gethostbyname"] = f"FAIL: {type(e).__name__}: {e}"
+
+    # 2. getaddrinfo AF_INET
+    try:
+        r = _s.getaddrinfo(host, 443, _s.AF_INET)
+        results["getaddrinfo_AF_INET"] = f"OK: {r[0][4]}"
+    except Exception as e:
+        results["getaddrinfo_AF_INET"] = f"FAIL: {type(e).__name__}: {e}"
+
+    # 3. getaddrinfo AF_UNSPEC
+    try:
+        r = _s.getaddrinfo(host, 443)
+        results["getaddrinfo_AF_UNSPEC"] = f"OK: {r[0][4]}"
+    except Exception as e:
+        results["getaddrinfo_AF_UNSPEC"] = f"FAIL: {type(e).__name__}: {e}"
+
+    # 4. socket.connect directo con IP (si gethostbyname funciono)
+    if ip:
+        try:
+            raw = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
+            raw.settimeout(5)
+            raw.connect((ip, 443))
+            raw.close()
+            results["socket_connect_ip"] = f"OK: conectado a {ip}:443"
+        except Exception as e:
+            results["socket_connect_ip"] = f"FAIL: {type(e).__name__}: {e}"
+
+    # 5. SSL handshake
+    if ip:
+        try:
+            ctx = ssl.create_default_context()
+            raw = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
+            raw.settimeout(5)
+            raw.connect((ip, 443))
+            tls = ctx.wrap_socket(raw, server_hostname=host)
+            tls.close()
+            results["ssl_handshake"] = "OK"
+        except Exception as e:
+            results["ssl_handshake"] = f"FAIL: {type(e).__name__}: {e}"
+
+    return results
+
+
+@mcp.tool()
 def listar_pedidos(
     estado: str | None = None,
     telefono: str | None = None,
