@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 
@@ -12,11 +12,15 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 
+# Disable interactive docs in production (DEBUG=False)
+_docs_url = "/docs" if settings.DEBUG else None
+_redoc_url = "/redoc" if settings.DEBUG else None
+
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url=_docs_url,
+    redoc_url=_redoc_url,
     description=(
         "## Sistema de Automatización de Pedidos por WhatsApp\n\n"
         "Recibe mensajes de clientes via WhatsApp Business API, los interpreta con "
@@ -39,13 +43,35 @@ app = FastAPI(
     license_info={"name": "MIT"},
 )
 
+# ── CORS ──────────────────────────────────────────────────────────────────────
+# Reads from ALLOWED_ORIGINS env var (comma-separated).
+# Dev default: localhost:3000 | Prod: set to your Vercel URL.
+_origins = [o.strip() for o in settings.ALLOWED_ORIGINS.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Hub-Signature-256"],
 )
 
+
+# ── Security headers ──────────────────────────────────────────────────────────
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next) -> Response:
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    if not settings.DEBUG:
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=63072000; includeSubDomains; preload"
+        )
+    return response
+
+
+# ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(auth.router, prefix="/api/v1", tags=["Auth"])
 app.include_router(webhook.router, prefix="/api/v1", tags=["Webhook"])
 app.include_router(orders.router, prefix="/api/v1", tags=["Orders (Admin)"])
@@ -55,8 +81,6 @@ app.include_router(orders.router, prefix="/api/v1", tags=["Orders (Admin)"])
 def health_check():
     """Returns service status and current version."""
     return {"status": "ok", "version": settings.APP_VERSION}
-
-
 
 
 def custom_openapi():

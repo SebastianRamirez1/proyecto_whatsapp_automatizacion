@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  test:
+    name: Tests (Python 3.11)
+    runs-on: ubuntu-latest
+
+    env:
+      DATABASE_URL: sqlite:///./test_ci.db
+      WHATSAPP_VERIFY_TOKEN: ci_verify_token
+      WHATSAPP_ACCESS_TOKEN: ci_access_token
+      WHATSAPP_PHONE_NUMBER_ID: "123456789"
+      META_APP_SECRET: ci_app_secret_32_chars_padded_xx
+      OPENAI_API_KEY: sk-test-key
+      SECRET_KEY: ci_secret_key_must_be_32_chars_xx
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD_HASH: "$2b$12$EixZaYVK1fsbw1ZfbX3OXePaWxn96p36WQoeG6Lruj3vjPGga31lW"
+      ALLOWED_ORIGINS: http://localhost:3000
+      DEBUG: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests with coverage
+        run: |
+          pytest --tb=short -q \
+            --cov=app \
+            --cov-report=term-missing \
+            --cov-fail-under=70
+
+      - name: Clean up test DBs
+        if: always()
+        run: rm -f test_ci.db test.db test_auth.db

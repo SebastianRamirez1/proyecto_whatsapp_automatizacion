@@ -107,14 +107,14 @@ export default function OrdersTable() {
                   <TableCell>
                     <div>
                       <p className="font-medium text-xs">{order.client.name || "—"}</p>
-                      <p className="text-xs text-zinc-400">{formatPhone(order.client.phone)}</p>
+                      <p className="text-xs text-zinc-500">{formatPhone(order.client.phone)}</p>
                     </div>
                   </TableCell>
                   <TableCell className="text-xs text-zinc-600 max-w-xs">
                     {truncate(order.raw_message, 55)}
                   </TableCell>
                   <TableCell><StatusBadge status={order.status} /></TableCell>
-                  <TableCell className="text-xs text-zinc-400 whitespace-nowrap">
+                  <TableCell className="text-xs text-zinc-500 whitespace-nowrap">
                     {formatDate(order.created_at)}
                   </TableCell>
                   <TableCell>
