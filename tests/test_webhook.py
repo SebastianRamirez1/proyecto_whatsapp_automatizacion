@@ -9,9 +9,6 @@ from app.main import app
 
 client = TestClient(app)
 
-VERIFY_TOKEN = "test_verify_token"
-APP_SECRET = "test_app_secret"
-
 
 def make_signature(payload: bytes, secret: str) -> str:
     digest = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
@@ -20,13 +17,12 @@ def make_signature(payload: bytes, secret: str) -> str:
 
 @pytest.fixture(autouse=True)
 def patch_settings(monkeypatch):
-    monkeypatch.setenv("WHATSAPP_VERIFY_TOKEN", VERIFY_TOKEN)
-    monkeypatch.setenv("META_APP_SECRET", APP_SECRET)
-    monkeypatch.setenv("DATABASE_URL", "sqlite:///./test.db")
-    monkeypatch.setenv("WHATSAPP_ACCESS_TOKEN", "test")
-    monkeypatch.setenv("WHATSAPP_PHONE_NUMBER_ID", "123")
-    monkeypatch.setenv("OPENAI_API_KEY", "test")
-    monkeypatch.setenv("SECRET_KEY", "test_secret_32_chars_long_padded")
+    """Patch the settings object directly — monkeypatch.setenv() does not affect
+    pydantic-settings objects that are already instantiated at module import time."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "WHATSAPP_VERIFY_TOKEN", "test_verify_token")
+    monkeypatch.setattr(settings, "META_APP_SECRET", "test_app_secret")
 
 
 class TestWebhookVerification:
@@ -35,7 +31,7 @@ class TestWebhookVerification:
             "/api/v1/webhook",
             params={
                 "hub.mode": "subscribe",
-                "hub.verify_token": VERIFY_TOKEN,
+                "hub.verify_token": "test_verify_token",
                 "hub.challenge": "12345",
             },
         )
@@ -86,7 +82,7 @@ class TestWebhookReceiver:
 
     def test_valid_message_returns_200(self):
         payload = json.dumps(self._build_payload("Quiero 2 cubetas de huevos")).encode()
-        signature = make_signature(payload, APP_SECRET)
+        signature = make_signature(payload, "test_app_secret")
         response = client.post(
             "/api/v1/webhook",
             content=payload,

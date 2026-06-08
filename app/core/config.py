@@ -28,8 +28,12 @@ class Settings(BaseSettings):
     # Admin credentials (stored hashed in env; default for local dev only)
     ADMIN_USERNAME: str = "admin"
     ADMIN_PASSWORD_HASH: str = (
-        "$2b$12$EixZaYVK1fsbw1ZfbX3OXePaWxn96p36WQoeG6Lruj3vjPGga31lW"  # "secret"
+        "$2b$12$EixZaYVK1fsbw1ZfbX3OXePaWxn96p36WQoeG6Lruj3vjPGga31lW"  # "secret" — override in prod
     )
+
+    # CORS: comma-separated allowed origins.
+    # In production set to your Vercel URL, e.g.: https://tu-app.vercel.app
+    ALLOWED_ORIGINS: str = "http://localhost:3000"
 
     class Config:
         env_file = ".env"

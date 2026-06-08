@@ -5,22 +5,18 @@ from app.main import app
 
 client = TestClient(app)
 
+# Hash of "testpass" generated with passlib bcrypt
+_TESTPASS_HASH = "$2b$12$KIXtyPOYsDMHLmQnlMt7sOrZPGTtRBGfZNdUNPHPEBVxqsRhLWkPi"
+
 
 @pytest.fixture(autouse=True)
-def patch_env(monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "sqlite:///./test_auth.db")
-    monkeypatch.setenv("WHATSAPP_VERIFY_TOKEN", "test")
-    monkeypatch.setenv("META_APP_SECRET", "test")
-    monkeypatch.setenv("WHATSAPP_ACCESS_TOKEN", "test")
-    monkeypatch.setenv("WHATSAPP_PHONE_NUMBER_ID", "123")
-    monkeypatch.setenv("OPENAI_API_KEY", "test")
-    monkeypatch.setenv("SECRET_KEY", "test_secret_key_must_be_long_enough_32c")
-    monkeypatch.setenv("ADMIN_USERNAME", "admin")
-    # hash de "testpass"
-    monkeypatch.setenv(
-        "ADMIN_PASSWORD_HASH",
-        "$2b$12$KIXtyPOYsDMHLmQnlMt7sOrZPGTtRBGfZNdUNPHPEBVxqsRhLWkPi",
-    )
+def patch_settings(monkeypatch):
+    """Patch the settings object directly — monkeypatch.setenv() does not affect
+    pydantic-settings objects that are already instantiated at module import time."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "ADMIN_USERNAME", "admin")
+    monkeypatch.setattr(settings, "ADMIN_PASSWORD_HASH", _TESTPASS_HASH)
 
 
 class TestLogin:
@@ -98,11 +94,13 @@ class TestProtectedEndpoints:
         assert response.status_code == 200
 
     def test_webhook_get_is_public(self):
+        from app.core.config import settings
+
         response = client.get(
             "/api/v1/webhook",
             params={
                 "hub.mode": "subscribe",
-                "hub.verify_token": "test",
+                "hub.verify_token": settings.WHATSAPP_VERIFY_TOKEN,
                 "hub.challenge": "42",
             },
         )
