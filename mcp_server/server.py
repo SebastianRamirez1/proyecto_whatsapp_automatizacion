@@ -1,21 +1,43 @@
 """
-MCP Server — Pedidos WhatsApp
+MCP Server - Pedidos WhatsApp
 ==============================
 Expone la API de pedidos como herramientas MCP.
 
 Modos de transporte (auto-detectados):
-  stdio  → local, para Claude Desktop / Cursor (sin variable PORT)
-  SSE    → remoto, para deploy en Railway / Fly.io / etc. (PORT definido)
+  stdio  -> local, para Claude Desktop / Cursor (sin variable PORT)
+  SSE    -> remoto, para deploy en Railway / Fly.io / etc. (PORT definido)
 
 Variables de entorno:
   API_URL        URL base del backend FastAPI
   ADMIN_USERNAME Usuario admin del backend
-  ADMIN_PASSWORD Contraseña admin del backend
+  ADMIN_PASSWORD Contrasena admin del backend
   MCP_SECRET     (opcional) Token Bearer para proteger el endpoint SSE
-  PORT           (Railway lo inyecta automáticamente en modo SSE)
+  PORT           (Railway lo inyecta automaticamente en modo SSE)
 """
 
 from __future__ import annotations
+
+# ── IPv4 DNS fix (Windows [Errno 11001] getaddrinfo failed) ──────────────────
+# socket.getaddrinfo con AF_UNSPEC falla en algunas configs de Windows.
+# Solución: parchear socket.create_connection para pre-resolver el host con
+# gethostbyname (IPv4-only, siempre funciona), y pasar la IP directamente.
+# httpcore/httpx usan socket.create_connection como atributo de módulo,
+# por lo que este parche se aplica en tiempo de llamada.
+import socket as _sock
+
+_orig_create_conn = _sock.create_connection
+
+def _ipv4_create_connection(address, *args, **kwargs):
+    host, port = address
+    try:
+        ip = _sock.gethostbyname(host)
+        address = (ip, port)
+    except OSError:
+        pass  # Si falla, dejar que siga con la dirección original
+    return _orig_create_conn(address, *args, **kwargs)
+
+_sock.create_connection = _ipv4_create_connection
+# ─────────────────────────────────────────────────────────────────────────────
 
 import os
 from typing import Any
@@ -45,7 +67,7 @@ VALID_TRANSITIONS: dict[str, list[str]] = {
     "cancelado":      [],
 }
 
-# ── Auth — JWT con refresh automático en 401 ─────────────────────────────────
+# ── Auth — JWT con refresh automatico en 401 ─────────────────────────────────
 _token: str | None = None
 
 
@@ -53,7 +75,7 @@ def _login() -> str:
     if not ADMIN_USERNAME or not ADMIN_PASSWORD:
         raise RuntimeError(
             "Faltan credenciales. "
-            "Definí ADMIN_USERNAME y ADMIN_PASSWORD en mcp_server/.env o como env vars."
+            "Defini ADMIN_USERNAME y ADMIN_PASSWORD en mcp_server/.env o como env vars."
         )
     resp = httpx.post(
         f"{API_URL}/api/v1/auth/login",
@@ -103,8 +125,8 @@ mcp = FastMCP(
     "Pedidos WhatsApp",
     instructions=(
         "Servidor MCP para gestionar pedidos del bot de WhatsApp. "
-        "Podés listar pedidos, ver detalles, consultar estadísticas, "
-        "cambiar estados (con WhatsApp automático al cliente) y ver pendientes."
+        "Podes listar pedidos, ver detalles, consultar estadisticas, "
+        "cambiar estados (con WhatsApp automatico al cliente) y ver pendientes."
     ),
 )
 
@@ -119,11 +141,11 @@ def listar_pedidos(
 
     Args:
         estado: recibido | confirmado | en_preparacion | listo | entregado | cancelado
-        telefono: Número de WhatsApp del cliente (ej: 573001234567)
-        limite: Cuántos devolver (default 20, máximo 200)
+        telefono: Numero de WhatsApp del cliente (ej: 573001234567)
+        limite: Cuantos devolver (default 20, maximo 200)
     """
     if estado and estado not in VALID_STATUSES:
-        return [{"error": f"Estado '{estado}' inválido. Válidos: {sorted(VALID_STATUSES)}"}]
+        return [{"error": f"Estado '{estado}' invalido. Validos: {sorted(VALID_STATUSES)}"}]
     return _get("/api/v1/orders", status=estado, phone=telefono, limit=limite)
 
 
@@ -132,7 +154,7 @@ def obtener_pedido(order_id: int) -> dict:
     """Obtiene el detalle completo de un pedido por su ID.
 
     Args:
-        order_id: ID numérico del pedido
+        order_id: ID numerico del pedido
     """
     try:
         return _get(f"/api/v1/orders/{order_id}")
@@ -144,10 +166,10 @@ def obtener_pedido(order_id: int) -> dict:
 
 @mcp.tool()
 def estadisticas_pedidos() -> dict:
-    """Estadísticas de pedidos agrupadas por estado.
+    """Estadisticas de pedidos agrupadas por estado.
 
     Returns:
-        total: conteo general · by_status: conteo por cada estado
+        total: conteo general, by_status: conteo por cada estado
     """
     return _get("/api/v1/orders/summary/stats")
 
@@ -158,22 +180,22 @@ def actualizar_estado(
     nuevo_estado: str,
     notificar_cliente: bool = True,
 ) -> dict:
-    """Cambia el estado de un pedido. Envía WhatsApp automático al cliente si notificar_cliente=True.
+    """Cambia el estado de un pedido. Envia WhatsApp automatico al cliente si notificar_cliente=True.
 
-    Transiciones válidas:
-        recibido → confirmado | cancelado
-        confirmado → en_preparacion | cancelado
-        en_preparacion → listo | cancelado
-        listo → entregado
-        entregado / cancelado → (estados finales)
+    Transiciones validas:
+        recibido -> confirmado | cancelado
+        confirmado -> en_preparacion | cancelado
+        en_preparacion -> listo | cancelado
+        listo -> entregado
+        entregado / cancelado -> (estados finales)
 
     Args:
         order_id: ID del pedido
-        nuevo_estado: Estado destino (ver transiciones válidas)
+        nuevo_estado: Estado destino (ver transiciones validas)
         notificar_cliente: Enviar mensaje WhatsApp al cliente (default True)
     """
     if nuevo_estado not in VALID_STATUSES:
-        return {"error": f"Estado '{nuevo_estado}' inválido. Válidos: {sorted(VALID_STATUSES)}"}
+        return {"error": f"Estado '{nuevo_estado}' invalido. Validos: {sorted(VALID_STATUSES)}"}
     try:
         return _patch(
             f"/api/v1/orders/{order_id}/status",
@@ -184,16 +206,15 @@ def actualizar_estado(
         if e.response.status_code == 404:
             return {"error": f"No existe un pedido con ID {order_id}"}
         if e.response.status_code == 400:
-            return {"error": e.response.json().get("detail", "Transición no permitida")}
+            return {"error": e.response.json().get("detail", "Transicion no permitida")}
         raise
 
 
 @mcp.tool()
 def pedidos_pendientes() -> dict:
-    """Todos los pedidos que necesitan atención (no finalizados).
+    """Todos los pedidos que necesitan atencion (no finalizados).
 
     Agrupa por estado: recibido, confirmado, en_preparacion, listo.
-    Útil para ver de un vistazo qué hay que atender.
     """
     activos = [
         p for p in _get("/api/v1/orders", limit=200)
@@ -217,7 +238,6 @@ def pedidos_pendientes() -> dict:
 def _make_secret_guard(app: Any, secret: str) -> Any:
     """Middleware ASGI liviano que rechaza requests sin el Bearer token correcto."""
     async def guarded(scope: dict, receive: Any, send: Any) -> None:
-        # Dejar pasar eventos de ciclo de vida del servidor
         if scope["type"] == "lifespan":
             await app(scope, receive, send)
             return
@@ -229,7 +249,6 @@ def _make_secret_guard(app: Any, secret: str) -> Any:
             await app(scope, receive, send)
             return
 
-        # Rechazar con 401
         body = b'{"error":"Unauthorized - falta o es incorrecto el Bearer token"}'
         await send({
             "type": "http.response.start",
@@ -249,21 +268,13 @@ def main() -> None:
     port_env = os.getenv("PORT")
 
     if port_env:
-        # ── Modo SSE: deploy en Railway / Fly.io / cualquier PaaS ────────────
         import uvicorn
-
         app = mcp.sse_app()
-
         secret = os.getenv("MCP_SECRET")
         if secret:
             app = _make_secret_guard(app, secret)
-            print(f"[MCP] SSE mode — puerto {port_env} — auth: Bearer ****")
-        else:
-            print(f"[MCP] SSE mode — puerto {port_env} — auth: deshabilitada")
-
         uvicorn.run(app, host="0.0.0.0", port=int(port_env), log_level="info")
     else:
-        # ── Modo stdio: Claude Desktop / Cursor local ─────────────────────────
         mcp.run()
 
 
