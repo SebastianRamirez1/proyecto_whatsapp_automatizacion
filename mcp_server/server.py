@@ -48,11 +48,64 @@ VALID_TRANSITIONS: dict[str, list[str]] = {
 }
 
 
-# ── HTTP client (stdlib http.client — usa getaddrinfo AF_UNSPEC por defecto) ──
-# Diagnostico confirmado: en este Windows, AF_UNSPEC funciona OK pero AF_INET
-# falla. http.client.HTTPSConnection usa socket.create_connection que a su vez
-# usa getaddrinfo(AF_UNSPEC=0), lo que es exactamente lo que funciona aqui.
-# NO tocar el metodo connect() — el default es correcto.
+# ── DNS cache — resuelve el hostname una sola vez y reutiliza la IP ───────────
+# Diagnostico: el DNS es intermitente en este Windows. La unica combinacion
+# confiable es getaddrinfo(AF_INET, SOCK_STREAM), pero a veces falla tambien.
+# Solucion: resolver UNA sola vez al startup y cachear la IP para siempre.
+# Todas las conexiones usan la IP directamente (sin DNS en caliente).
+# SSL/TLS sigue usando el hostname original para SNI y verificacion de cert.
+
+import socket as _socket
+import ssl as _ssl
+
+_DNS_CACHE: dict[str, str] = {}  # hostname → ip
+
+
+def _resolve(hostname: str, port: int = 443) -> str:
+    """Resuelve hostname a IP probando multiples combinaciones de getaddrinfo."""
+    if hostname in _DNS_CACHE:
+        return _DNS_CACHE[hostname]
+
+    last_err: Exception | None = None
+    for family, socktype in [
+        (_socket.AF_INET,   _socket.SOCK_STREAM),
+        (_socket.AF_UNSPEC, _socket.SOCK_STREAM),
+        (_socket.AF_UNSPEC, 0),
+        (_socket.AF_INET,   0),
+    ]:
+        try:
+            results = _socket.getaddrinfo(hostname, port, family, socktype)
+            if results:
+                ip = results[0][4][0]
+                _DNS_CACHE[hostname] = ip
+                return ip
+        except OSError as e:
+            last_err = e
+
+    raise last_err or OSError(f"No se pudo resolver {hostname}")
+
+
+class _CachedHTTPSConn(http.client.HTTPSConnection):
+    """HTTPSConnection que usa IP cacheada para evitar DNS intermitente.
+
+    Resuelve el hostname una vez con la combinacion de flags que funcione,
+    conecta directamente a la IP (sin llamar a getaddrinfo en el connect),
+    y usa el hostname original para SNI/TLS para que el cert sea valido.
+    """
+
+    def connect(self) -> None:
+        ip = _resolve(self.host, self.port)
+
+        # Crear socket AF_INET y conectar a la IP — sin llamar a getaddrinfo
+        raw = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        timeout = self.timeout
+        raw.settimeout(timeout if isinstance(timeout, (int, float)) else 10)
+        raw.connect((ip, self.port))
+
+        # SSL con el hostname original para SNI y verificacion del certificado
+        ctx: _ssl.SSLContext = getattr(self, "_context", None) or _ssl.create_default_context()
+        self.sock = ctx.wrap_socket(raw, server_hostname=self.host)
+
 
 class _HTTPError(Exception):
     def __init__(self, status: int, body: Any):
@@ -90,9 +143,7 @@ def _do_request(
     if headers:
         h.update(headers)
 
-    # http.client.HTTPSConnection usa socket.create_connection internamente
-    # → getaddrinfo(host, port, AF_UNSPEC, SOCK_STREAM) → funciona en este Windows
-    conn = http.client.HTTPSConnection(host, port, timeout=timeout)
+    conn = _CachedHTTPSConn(host, port, timeout=timeout)
     try:
         conn.request(method, path, body=encoded, headers=h)
         resp = conn.getresponse()
@@ -173,45 +224,37 @@ mcp = FastMCP(
 
 @mcp.tool()
 def test_conexion() -> dict:
-    """Diagnostica la conectividad de red (debug)."""
-    import socket as _s
-    import http.client
-    import urllib.request
+    """Diagnostica la conectividad y estado del cache DNS (debug)."""
     host = "web-production-42788.up.railway.app"
-    r: dict = {}
+    r: dict = {"dns_cache": dict(_DNS_CACHE)}
 
-    for label, kwargs in [
-        ("getaddrinfo()_AF_UNSPEC_type0",   dict(family=0, type=0)),
-        ("getaddrinfo()_AF_UNSPEC_STREAM",  dict(family=0, type=_s.SOCK_STREAM)),
-        ("getaddrinfo()_AF_INET_type0",     dict(family=_s.AF_INET, type=0)),
-        ("getaddrinfo()_AF_INET_STREAM",    dict(family=_s.AF_INET, type=_s.SOCK_STREAM)),
+    # Probar resolucion con cada combinacion
+    for label, family, socktype in [
+        ("AF_INET+STREAM",  _socket.AF_INET,   _socket.SOCK_STREAM),
+        ("AF_UNSPEC+STREAM",_socket.AF_UNSPEC, _socket.SOCK_STREAM),
+        ("AF_UNSPEC+0",     _socket.AF_UNSPEC, 0),
     ]:
         try:
-            res = _s.getaddrinfo(host, 443, **kwargs)
-            r[label] = f"OK: {res[0][4]}"
+            res = _socket.getaddrinfo(host, 443, family, socktype)
+            r[f"getaddrinfo_{label}"] = f"OK: {res[0][4]}"
         except Exception as e:
-            r[label] = f"FAIL: {e}"
+            r[f"getaddrinfo_{label}"] = f"FAIL: {e}"
 
+    # Probar _resolve (con cache)
     try:
-        c = _s.create_connection((host, 443), timeout=5)
-        c.close()
-        r["create_connection"] = "OK"
+        ip = _resolve(host)
+        r["_resolve"] = f"OK: {ip}"
     except Exception as e:
-        r["create_connection"] = f"FAIL: {e}"
+        r["_resolve"] = f"FAIL: {e}"
 
+    # Probar conexion SSL completa con _CachedHTTPSConn
     try:
-        conn = http.client.HTTPSConnection(host, 443, timeout=5)
+        conn = _CachedHTTPSConn(host, 443, timeout=5)
         conn.connect()
         conn.close()
-        r["https_connection"] = "OK"
+        r["CachedHTTPSConn"] = "OK"
     except Exception as e:
-        r["https_connection"] = f"FAIL: {e}"
-
-    try:
-        with urllib.request.urlopen(f"https://{host}/api/v1/health", timeout=5) as resp:
-            r["urllib_request"] = f"OK: {resp.status}"
-    except Exception as e:
-        r["urllib_request"] = f"FAIL: {e}"
+        r["CachedHTTPSConn"] = f"FAIL: {e}"
 
     return r
 
