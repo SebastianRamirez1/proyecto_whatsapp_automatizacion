@@ -20,8 +20,6 @@ from __future__ import annotations
 import http.client
 import json
 import os
-import socket
-import ssl
 import urllib.parse
 from typing import Any
 
@@ -50,31 +48,17 @@ VALID_TRANSITIONS: dict[str, list[str]] = {
 }
 
 
-# ── HTTP client (stdlib pura — evita getaddrinfo / AF_UNSPEC) ─────────────────
-# En algunos Windows, socket.getaddrinfo con AF_UNSPEC falla para ciertos
-# hostnames mientras que socket.gethostbyname (IPv4 puro) funciona OK.
-# Usamos http.client.HTTPSConnection con connect() personalizado que emplea
-# gethostbyname en lugar de getaddrinfo para resolver el hostname.
+# ── HTTP client (stdlib http.client — usa getaddrinfo AF_UNSPEC por defecto) ──
+# Diagnostico confirmado: en este Windows, AF_UNSPEC funciona OK pero AF_INET
+# falla. http.client.HTTPSConnection usa socket.create_connection que a su vez
+# usa getaddrinfo(AF_UNSPEC=0), lo que es exactamente lo que funciona aqui.
+# NO tocar el metodo connect() — el default es correcto.
 
-class _IPv4HTTPSConn(http.client.HTTPSConnection):
-    """HTTPSConnection que resuelve con gethostbyname (IPv4) en lugar de getaddrinfo."""
-
-    def connect(self) -> None:
-        # Resolver hostname manualmente con IPv4
-        try:
-            ip = socket.gethostbyname(self.host)
-        except OSError:
-            ip = self.host  # Fallback: intentar con el hostname directo
-
-        # Crear socket IPv4 directamente (sin llamar a getaddrinfo)
-        raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        timeout = self.timeout
-        raw.settimeout(timeout if isinstance(timeout, (int, float)) else 10)
-        raw.connect((ip, self.port))
-
-        # Envolver con TLS usando el hostname original para SNI y verificacion
-        ctx: ssl.SSLContext = getattr(self, "_context", None) or ssl.create_default_context()
-        self.sock = ctx.wrap_socket(raw, server_hostname=self.host)
+class _HTTPError(Exception):
+    def __init__(self, status: int, body: Any):
+        self.status = status
+        self.body   = body
+        super().__init__(f"HTTP {status}: {body}")
 
 
 def _do_request(
@@ -97,22 +81,22 @@ def _do_request(
         if clean:
             path += "?" + urllib.parse.urlencode(clean)
 
-    h: dict[str, str] = {"Host": host, "Accept": "application/json"}
+    h: dict[str, str] = {"Accept": "application/json"}
+    encoded: bytes | None = None
     if body is not None:
         encoded = json.dumps(body).encode()
         h["Content-Type"] = "application/json"
         h["Content-Length"] = str(len(encoded))
-    else:
-        encoded = None
-
     if headers:
         h.update(headers)
 
-    conn = _IPv4HTTPSConn(host, port, timeout=timeout)
+    # http.client.HTTPSConnection usa socket.create_connection internamente
+    # → getaddrinfo(host, port, AF_UNSPEC, SOCK_STREAM) → funciona en este Windows
+    conn = http.client.HTTPSConnection(host, port, timeout=timeout)
     try:
         conn.request(method, path, body=encoded, headers=h)
         resp = conn.getresponse()
-        status = resp.status
+        status   = resp.status
         raw_body = resp.read()
     finally:
         conn.close()
@@ -120,13 +104,6 @@ def _do_request(
     if not raw_body:
         return status, {}
     return status, json.loads(raw_body.decode("utf-8"))
-
-
-class _HTTPError(Exception):
-    def __init__(self, status: int, body: Any):
-        self.status = status
-        self.body   = body
-        super().__init__(f"HTTP {status}: {body}")
 
 
 # ── Auth — JWT con refresh automatico en 401 ─────────────────────────────────
@@ -192,65 +169,6 @@ mcp = FastMCP(
         "cambiar estados (con WhatsApp automatico al cliente) y ver pendientes."
     ),
 )
-
-
-@mcp.tool()
-def test_conexion() -> dict:
-    """Diagnostica la conectividad de red desde el proceso MCP (util para debug)."""
-    import socket as _s
-    import ssl
-    import http.client
-    results: dict = {}
-
-    host = "web-production-42788.up.railway.app"
-
-    # 1. gethostbyname
-    try:
-        ip = _s.gethostbyname(host)
-        results["gethostbyname"] = f"OK: {ip}"
-    except Exception as e:
-        ip = None
-        results["gethostbyname"] = f"FAIL: {type(e).__name__}: {e}"
-
-    # 2. getaddrinfo AF_INET
-    try:
-        r = _s.getaddrinfo(host, 443, _s.AF_INET)
-        results["getaddrinfo_AF_INET"] = f"OK: {r[0][4]}"
-    except Exception as e:
-        results["getaddrinfo_AF_INET"] = f"FAIL: {type(e).__name__}: {e}"
-
-    # 3. getaddrinfo AF_UNSPEC
-    try:
-        r = _s.getaddrinfo(host, 443)
-        results["getaddrinfo_AF_UNSPEC"] = f"OK: {r[0][4]}"
-    except Exception as e:
-        results["getaddrinfo_AF_UNSPEC"] = f"FAIL: {type(e).__name__}: {e}"
-
-    # 4. socket.connect directo con IP (si gethostbyname funciono)
-    if ip:
-        try:
-            raw = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
-            raw.settimeout(5)
-            raw.connect((ip, 443))
-            raw.close()
-            results["socket_connect_ip"] = f"OK: conectado a {ip}:443"
-        except Exception as e:
-            results["socket_connect_ip"] = f"FAIL: {type(e).__name__}: {e}"
-
-    # 5. SSL handshake
-    if ip:
-        try:
-            ctx = ssl.create_default_context()
-            raw = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
-            raw.settimeout(5)
-            raw.connect((ip, 443))
-            tls = ctx.wrap_socket(raw, server_hostname=host)
-            tls.close()
-            results["ssl_handshake"] = "OK"
-        except Exception as e:
-            results["ssl_handshake"] = f"FAIL: {type(e).__name__}: {e}"
-
-    return results
 
 
 @mcp.tool()
