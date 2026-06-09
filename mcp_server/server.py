@@ -172,6 +172,51 @@ mcp = FastMCP(
 
 
 @mcp.tool()
+def test_conexion() -> dict:
+    """Diagnostica la conectividad de red (debug)."""
+    import socket as _s
+    import http.client
+    import urllib.request
+    host = "web-production-42788.up.railway.app"
+    r: dict = {}
+
+    for label, kwargs in [
+        ("getaddrinfo()_AF_UNSPEC_type0",   dict(family=0, type=0)),
+        ("getaddrinfo()_AF_UNSPEC_STREAM",  dict(family=0, type=_s.SOCK_STREAM)),
+        ("getaddrinfo()_AF_INET_type0",     dict(family=_s.AF_INET, type=0)),
+        ("getaddrinfo()_AF_INET_STREAM",    dict(family=_s.AF_INET, type=_s.SOCK_STREAM)),
+    ]:
+        try:
+            res = _s.getaddrinfo(host, 443, **kwargs)
+            r[label] = f"OK: {res[0][4]}"
+        except Exception as e:
+            r[label] = f"FAIL: {e}"
+
+    try:
+        c = _s.create_connection((host, 443), timeout=5)
+        c.close()
+        r["create_connection"] = "OK"
+    except Exception as e:
+        r["create_connection"] = f"FAIL: {e}"
+
+    try:
+        conn = http.client.HTTPSConnection(host, 443, timeout=5)
+        conn.connect()
+        conn.close()
+        r["https_connection"] = "OK"
+    except Exception as e:
+        r["https_connection"] = f"FAIL: {e}"
+
+    try:
+        with urllib.request.urlopen(f"https://{host}/api/v1/health", timeout=5) as resp:
+            r["urllib_request"] = f"OK: {resp.status}"
+    except Exception as e:
+        r["urllib_request"] = f"FAIL: {e}"
+
+    return r
+
+
+@mcp.tool()
 def listar_pedidos(
     estado: str | None = None,
     telefono: str | None = None,
